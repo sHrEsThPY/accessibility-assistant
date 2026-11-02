@@ -22,15 +22,13 @@ load_dotenv()
 app = Flask(__name__)
 
 # Allow requests from Vite dev-server and production frontend
-CORS(app, resources={
-    r"/*": {
-        "origins": [
-            "http://localhost:5173",          # Vite dev
-            "http://localhost:3000",
-            os.environ.get("FRONTEND_URL", "")  # Production (set in Render env vars)
-        ]
-    }
-})
+_FRONTEND_URL = os.environ.get("FRONTEND_URL", "*")
+_ORIGINS = "*" if _FRONTEND_URL in ("*", "") else [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    _FRONTEND_URL,
+]
+CORS(app, resources={r"/*": {"origins": _ORIGINS}}, supports_credentials=False)
 
 logging.basicConfig(
     level=logging.INFO,
