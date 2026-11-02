@@ -131,6 +131,8 @@ def build_gemini_response(text: str, level: str) -> str:
             # Modern google-genai client (v1+)
             client = genai_client.Client(api_key=GEMINI_API_KEY)
             full_prompt = f"{system_prompt}\n\n---\n\n{text}"
+            result_text = None
+            last_err = None
             # Try gemini-2.0-flash first, fallback to 1.5-flash
             for model_name in ["gemini-2.0-flash", "gemini-1.5-flash"]:
                 try:
@@ -143,11 +145,28 @@ def build_gemini_response(text: str, level: str) -> str:
                             top_p=0.8,
                         ),
                     )
-                    result_text = resp.text
-                    break
+                    logger.info("Raw response from %s: candidates=%s", model_name, resp.candidates)
+                    # Safely extract text from response
+                    if hasattr(resp, "text") and resp.text:
+                        result_text = resp.text
+                    elif resp.candidates:
+                        parts = resp.candidates[0].content.parts
+                        result_text = "".join(p.text for p in parts if hasattr(p, "text"))
+                    if result_text:
+                        logger.info("Got response from model %s", model_name)
+                        break
+                    else:
+                        logger.warning("Model %s returned empty text, finish_reason=%s",
+                                       model_name,
+                                       resp.candidates[0].finish_reason if resp.candidates else "no candidates")
                 except Exception as model_err:
+                    last_err = model_err
                     logger.warning("Model %s failed: %s", model_name, model_err)
                     result_text = None
+
+            if not result_text and last_err:
+                raise RuntimeError(f"All Gemini models failed. Last error: {last_err}")
+
         else:
             # Legacy google-generativeai v0.x client
             generation_config = genai.types.GenerationConfig(
@@ -167,6 +186,7 @@ def build_gemini_response(text: str, level: str) -> str:
     except Exception as exc:
         logger.exception("Gemini API call failed: %s", exc)
         raise RuntimeError(f"Gemini API error: {str(exc)}") from exc
+
 
     if not result_text:
         raise RuntimeError(
