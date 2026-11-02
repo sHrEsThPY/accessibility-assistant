@@ -1,6 +1,6 @@
 """
 Accessibility Assistant — Flask Backend
-Phases 1 & 2: Core API + Document Parsing Engine
+Powered by Groq (Llama 3) for fast, reliable text simplification
 """
 
 import os
@@ -9,13 +9,8 @@ import logging
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
+from groq import Groq
 
-import google.generativeai as genai
-try:
-    from google import genai as genai_client
-    _USE_NEW_CLIENT = True
-except ImportError:
-    _USE_NEW_CLIENT = False
 import PyPDF2
 from docx import Document
 
@@ -26,7 +21,7 @@ load_dotenv()
 
 app = Flask(__name__)
 
-# Allow requests from Vite dev-server and production frontend
+# CORS — allow all origins (tighten after deployment)
 _FRONTEND_URL = os.environ.get("FRONTEND_URL", "*")
 _ORIGINS = "*" if _FRONTEND_URL in ("*", "") else [
     "http://localhost:5173",
@@ -42,18 +37,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
-# Gemini SDK Configuration
+# Groq Client Configuration
 # ─────────────────────────────────────────────
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-if not GEMINI_API_KEY:
+if not GROQ_API_KEY:
     logger.warning(
-        "GEMINI_API_KEY environment variable is not set. "
+        "GROQ_API_KEY environment variable is not set. "
         "API calls will fail until it is configured."
     )
+    groq_client = None
 else:
-    genai.configure(api_key=GEMINI_API_KEY)
-    logger.info("Gemini API configured successfully. new_client=%s", _USE_NEW_CLIENT)
+    groq_client = Groq(api_key=GROQ_API_KEY)
+    logger.info("Groq client initialised successfully.")
 
 
 # ─────────────────────────────────────────────
@@ -87,22 +83,25 @@ LEVEL_PROMPTS = {
 DEFAULT_LEVEL = "adult"
 ALLOWED_LEVELS = set(LEVEL_PROMPTS.keys())
 
-# Maximum characters we'll send to Gemini in one request
+# Maximum characters we'll send to Groq in one request
 MAX_INPUT_CHARS = 30_000
 
+# Groq model to use — fast and free
+GROQ_MODEL = "llama-3.1-8b-instant"
 
-def build_gemini_response(text: str, level: str) -> str:
+
+def build_groq_response(text: str, level: str) -> str:
     """
-    Send `text` to Gemini 1.5 Flash with the appropriate system prompt
+    Send `text` to Groq (Llama 3) with the appropriate system prompt
     and return the simplified response string.
 
     Raises:
         ValueError: For invalid input.
-        RuntimeError: For Gemini API failures.
+        RuntimeError: For Groq API failures.
     """
-    if not GEMINI_API_KEY:
+    if not groq_client:
         raise RuntimeError(
-            "GEMINI_API_KEY is not configured on the server. "
+            "GROQ_API_KEY is not configured on the server. "
             "Please contact the administrator."
         )
 
@@ -124,82 +123,38 @@ def build_gemini_response(text: str, level: str) -> str:
 
     system_prompt = LEVEL_PROMPTS[level]
 
-    logger.info("Sending request to Gemini | level=%s | input_length=%d", level, len(text))
+    logger.info("Sending request to Groq | model=%s | level=%s | input_length=%d",
+                GROQ_MODEL, level, len(text))
 
     try:
-        if _USE_NEW_CLIENT:
-            # Modern google-genai client (v1+)
-            client = genai_client.Client(api_key=GEMINI_API_KEY)
-            full_prompt = f"{system_prompt}\n\n---\n\n{text}"
-            result_text = None
-            last_err = None
-            # Try gemini-2.0-flash first, fallback to 1.5-flash
-            for model_name in ["gemini-2.0-flash", "gemini-1.5-flash"]:
-                try:
-                    resp = client.models.generate_content(
-                        model=model_name,
-                        contents=full_prompt,
-                        config=genai_client.types.GenerateContentConfig(
-                            temperature=0.2,
-                            max_output_tokens=2048,
-                            top_p=0.8,
-                        ),
-                    )
-                    logger.info("Raw response from %s: candidates=%s", model_name, resp.candidates)
-                    # Safely extract text from response
-                    if hasattr(resp, "text") and resp.text:
-                        result_text = resp.text
-                    elif resp.candidates:
-                        parts = resp.candidates[0].content.parts
-                        result_text = "".join(p.text for p in parts if hasattr(p, "text"))
-                    if result_text:
-                        logger.info("Got response from model %s", model_name)
-                        break
-                    else:
-                        logger.warning("Model %s returned empty text, finish_reason=%s",
-                                       model_name,
-                                       resp.candidates[0].finish_reason if resp.candidates else "no candidates")
-                except Exception as model_err:
-                    last_err = model_err
-                    logger.warning("Model %s failed: %s", model_name, model_err)
-                    result_text = None
-
-            if not result_text and last_err:
-                raise RuntimeError(f"All Gemini models failed. Last error: {last_err}")
-
-        else:
-            # Legacy google-generativeai v0.x client
-            generation_config = genai.types.GenerationConfig(
-                temperature=0.2,
-                max_output_tokens=2048,
-                top_p=0.8,
-                top_k=40,
-            )
-            model = genai.GenerativeModel(
-                model_name="gemini-1.5-flash",
-                generation_config=generation_config,
-                system_instruction=system_prompt,
-            )
-            response = model.generate_content(text)
-            result_text = response.text if response else None
-
-    except Exception as exc:
-        logger.exception("Gemini API call failed: %s", exc)
-        raise RuntimeError(f"Gemini API error: {str(exc)}") from exc
-
-
-    if not result_text:
-        raise RuntimeError(
-            "Gemini returned an empty response. The content may have been blocked "
-            "by safety filters. Please try different text."
+        completion = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text},
+            ],
+            temperature=0.2,
+            max_tokens=2048,
+            top_p=0.8,
         )
 
-    logger.info("Gemini responded successfully | output_length=%d", len(result_text))
-    return result_text
+        result_text = completion.choices[0].message.content
+
+        if not result_text or not result_text.strip():
+            raise RuntimeError(
+                "Groq returned an empty response. Please try again."
+            )
+
+        logger.info("Groq responded successfully | output_length=%d", len(result_text))
+        return result_text.strip()
+
+    except Exception as exc:
+        logger.exception("Groq API call failed: %s", exc)
+        raise RuntimeError(f"AI API error: {str(exc)}") from exc
 
 
 # ─────────────────────────────────────────────
-# Phase 1 — Endpoint: /simplify-text
+# Endpoint: POST /simplify-text
 # ─────────────────────────────────────────────
 @app.route("/simplify-text", methods=["POST"])
 def simplify_text():
@@ -216,7 +171,7 @@ def simplify_text():
         text = payload.get("text", "")
         level = payload.get("level", DEFAULT_LEVEL)
 
-        simplified = build_gemini_response(text, level)
+        simplified = build_groq_response(text, level)
 
         return jsonify({
             "simplified": simplified,
@@ -230,7 +185,7 @@ def simplify_text():
         return jsonify({"error": str(exc)}), 422
 
     except RuntimeError as exc:
-        logger.error("Runtime error: %s", exc)
+        logger.error("Runtime error in /simplify-text: %s", exc)
         return jsonify({"error": str(exc)}), 503
 
     except Exception as exc:
@@ -239,145 +194,144 @@ def simplify_text():
 
 
 # ─────────────────────────────────────────────
-# Phase 2 — Document Parsing Helpers
+# PDF Text Extractor
 # ─────────────────────────────────────────────
-ALLOWED_EXTENSIONS = {"pdf", "docx"}
-MAX_FILE_BYTES = 10 * 1024 * 1024  # 10 MB cap
-
-
-def allowed_file(filename: str) -> bool:
-    return (
-        "." in filename
-        and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
-    )
-
-
 def extract_text_from_pdf(file_bytes: bytes) -> str:
-    """
-    Extract all text from a PDF byte stream using PyPDF2.
-    Raises ValueError if the PDF is encrypted or empty.
-    """
-    reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
+    try:
+        reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
 
-    if reader.is_encrypted:
-        raise ValueError(
-            "This PDF is password-protected. Please provide an unlocked version."
-        )
+        if reader.is_encrypted:
+            raise ValueError(
+                "This PDF is password-protected. "
+                "Please remove the password before uploading."
+            )
 
-    pages_text = []
-    for page_num, page in enumerate(reader.pages, start=1):
-        try:
+        pages_text = []
+        for i, page in enumerate(reader.pages):
             page_text = page.extract_text() or ""
             pages_text.append(page_text)
-        except Exception as exc:
-            logger.warning("Could not extract page %d: %s", page_num, exc)
-            pages_text.append("")  # Gracefully skip bad pages
+            if sum(len(t) for t in pages_text) > MAX_INPUT_CHARS:
+                logger.info("PDF truncated at page %d to stay within char limit.", i + 1)
+                break
 
-    combined = "\n\n".join(pages_text).strip()
+        full_text = "\n".join(pages_text).strip()
 
-    if not combined:
-        raise ValueError(
-            "No readable text was found in this PDF. "
-            "It may be a scanned image-only document. "
-            "Please use a text-based PDF or copy-paste the text manually."
-        )
+        if not full_text:
+            raise ValueError(
+                "Could not extract text from this PDF. "
+                "It may be a scanned image-only PDF. "
+                "Please try a text-based PDF."
+            )
 
-    return combined
+        return full_text[:MAX_INPUT_CHARS]
+
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Failed to read PDF: {str(exc)}") from exc
 
 
+# ─────────────────────────────────────────────
+# DOCX Text Extractor
+# ─────────────────────────────────────────────
 def extract_text_from_docx(file_bytes: bytes) -> str:
-    """
-    Extract all paragraph text from a .docx file using python-docx.
-    """
-    doc = Document(io.BytesIO(file_bytes))
-    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+    try:
+        doc = Document(io.BytesIO(file_bytes))
+        paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+        full_text = "\n".join(paragraphs).strip()
 
-    if not paragraphs:
-        raise ValueError(
-            "No readable text was found in this Word document. "
-            "It may contain only images or unsupported content."
-        )
+        if not full_text:
+            raise ValueError(
+                "The Word document appears to be empty or contains no readable text."
+            )
 
-    return "\n\n".join(paragraphs)
+        return full_text[:MAX_INPUT_CHARS]
+
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Failed to read Word document: {str(exc)}") from exc
 
 
 # ─────────────────────────────────────────────
-# Phase 2 — Endpoint: /upload-document
+# Endpoint: POST /upload-document
 # ─────────────────────────────────────────────
+MAX_FILE_SIZE_MB = 10
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+
+ALLOWED_EXTENSIONS = {".pdf", ".docx"}
+ALLOWED_MIME_TYPES = {
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/msword",
+    "application/octet-stream",
+}
+
+
 @app.route("/upload-document", methods=["POST"])
 def upload_document():
     """
-    Accept multipart/form-data with:
-      - file: .pdf or .docx
-      - level: child|adult|bullet (form field, optional)
-    Return same JSON shape as /simplify-text plus "filename" and "page_count".
+    Accept: multipart/form-data with:
+      - file: the document (.pdf or .docx)
+      - level: simplification level (child|adult|bullet)
+
+    Returns: same format as /simplify-text
     """
     try:
         if "file" not in request.files:
-            return jsonify({"error": "No file was attached. Please upload a PDF or DOCX."}), 400
+            return jsonify({"error": "No file uploaded. Please include a 'file' field."}), 400
 
         uploaded_file = request.files["file"]
         level = request.form.get("level", DEFAULT_LEVEL)
 
         if not uploaded_file.filename:
-            return jsonify({"error": "File name is empty. Please re-upload the document."}), 400
+            return jsonify({"error": "Uploaded file has no filename."}), 400
 
-        if not allowed_file(uploaded_file.filename):
+        filename = uploaded_file.filename.lower()
+        _, ext = os.path.splitext(filename)
+
+        if ext not in ALLOWED_EXTENSIONS:
             return jsonify({
-                "error": f"Unsupported file type. Please upload a .pdf or .docx file."
-            }), 415
+                "error": f"Unsupported file type '{ext}'. "
+                         f"Please upload a .pdf or .docx file."
+            }), 422
 
         file_bytes = uploaded_file.read()
-        file_size = len(file_bytes)
 
-        if file_size == 0:
-            return jsonify({"error": "The uploaded file is empty."}), 400
-
-        if file_size > MAX_FILE_BYTES:
+        if len(file_bytes) > MAX_FILE_SIZE_BYTES:
             return jsonify({
-                "error": f"File is too large ({file_size / 1024 / 1024:.1f} MB). "
-                         f"Maximum allowed size is 10 MB."
-            }), 413
+                "error": f"File is too large ({len(file_bytes) / 1024 / 1024:.1f} MB). "
+                         f"Maximum allowed size is {MAX_FILE_SIZE_MB} MB."
+            }), 422
 
-        extension = uploaded_file.filename.rsplit(".", 1)[1].lower()
-        filename = uploaded_file.filename
+        if len(file_bytes) == 0:
+            return jsonify({"error": "Uploaded file is empty."}), 422
 
         logger.info(
-            "Document upload | filename=%s | size=%d bytes | level=%s",
-            filename, file_size, level
+            "Document upload | filename=%s | ext=%s | size=%d bytes | level=%s",
+            uploaded_file.filename, ext, len(file_bytes), level
         )
 
-        # Extract raw text based on file type
-        if extension == "pdf":
-            raw_text = extract_text_from_pdf(file_bytes)
-            # Estimate page count
-            reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
-            page_count = len(reader.pages)
-        else:  # docx
-            raw_text = extract_text_from_docx(file_bytes)
-            page_count = None  # DOCX doesn't have fixed pages
+        # Extract text
+        if ext == ".pdf":
+            extracted_text = extract_text_from_pdf(file_bytes)
+        elif ext == ".docx":
+            extracted_text = extract_text_from_docx(file_bytes)
+        else:
+            return jsonify({"error": "Unsupported file type."}), 422
 
-        # Truncate if needed (with notice)
-        truncated = False
-        if len(raw_text) > MAX_INPUT_CHARS:
-            raw_text = raw_text[:MAX_INPUT_CHARS]
-            truncated = True
-            logger.warning("Document text truncated to %d chars for %s", MAX_INPUT_CHARS, filename)
+        logger.info("Extracted %d characters from document.", len(extracted_text))
 
-        simplified = build_gemini_response(raw_text, level)
+        # Simplify the extracted text
+        simplified = build_groq_response(extracted_text, level)
 
-        response_data = {
+        return jsonify({
             "simplified": simplified,
             "level": level,
-            "filename": filename,
-            "original_length": len(raw_text),
+            "original_length": len(extracted_text),
             "simplified_length": len(simplified),
-            "truncated": truncated,
-        }
-        if page_count is not None:
-            response_data["page_count"] = page_count
-
-        return jsonify(response_data), 200
+            "filename": uploaded_file.filename,
+        }), 200
 
     except ValueError as exc:
         logger.warning("Document validation error: %s", exc)
@@ -400,7 +354,9 @@ def health():
     """Used by Render health checks and frontend connectivity tests."""
     return jsonify({
         "status": "ok",
-        "gemini_configured": bool(GEMINI_API_KEY),
+        "ai_provider": "groq",
+        "model": GROQ_MODEL,
+        "groq_configured": bool(GROQ_API_KEY),
     }), 200
 
 
