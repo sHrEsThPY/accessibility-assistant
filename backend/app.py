@@ -11,6 +11,11 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 
 import google.generativeai as genai
+try:
+    from google import genai as genai_client
+    _USE_NEW_CLIENT = True
+except ImportError:
+    _USE_NEW_CLIENT = False
 import PyPDF2
 from docx import Document
 
@@ -48,7 +53,7 @@ if not GEMINI_API_KEY:
     )
 else:
     genai.configure(api_key=GEMINI_API_KEY)
-    logger.info("Gemini API configured successfully.")
+    logger.info("Gemini API configured successfully. new_client=%s", _USE_NEW_CLIENT)
 
 
 # ─────────────────────────────────────────────
@@ -119,32 +124,58 @@ def build_gemini_response(text: str, level: str) -> str:
 
     system_prompt = LEVEL_PROMPTS[level]
 
-    # Generation config — low temperature keeps output factual and stable
-    generation_config = genai.types.GenerationConfig(
-        temperature=0.2,
-        max_output_tokens=2048,
-        top_p=0.8,
-        top_k=40,
-    )
-
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
-        generation_config=generation_config,
-        system_instruction=system_prompt,
-    )
-
     logger.info("Sending request to Gemini | level=%s | input_length=%d", level, len(text))
 
-    response = model.generate_content(text)
+    try:
+        if _USE_NEW_CLIENT:
+            # Modern google-genai client (v1+)
+            client = genai_client.Client(api_key=GEMINI_API_KEY)
+            full_prompt = f"{system_prompt}\n\n---\n\n{text}"
+            # Try gemini-2.0-flash first, fallback to 1.5-flash
+            for model_name in ["gemini-2.0-flash", "gemini-1.5-flash"]:
+                try:
+                    resp = client.models.generate_content(
+                        model=model_name,
+                        contents=full_prompt,
+                        config=genai_client.types.GenerateContentConfig(
+                            temperature=0.2,
+                            max_output_tokens=2048,
+                            top_p=0.8,
+                        ),
+                    )
+                    result_text = resp.text
+                    break
+                except Exception as model_err:
+                    logger.warning("Model %s failed: %s", model_name, model_err)
+                    result_text = None
+        else:
+            # Legacy google-generativeai v0.x client
+            generation_config = genai.types.GenerationConfig(
+                temperature=0.2,
+                max_output_tokens=2048,
+                top_p=0.8,
+                top_k=40,
+            )
+            model = genai.GenerativeModel(
+                model_name="gemini-1.5-flash",
+                generation_config=generation_config,
+                system_instruction=system_prompt,
+            )
+            response = model.generate_content(text)
+            result_text = response.text if response else None
 
-    if not response or not response.text:
+    except Exception as exc:
+        logger.exception("Gemini API call failed: %s", exc)
+        raise RuntimeError(f"Gemini API error: {str(exc)}") from exc
+
+    if not result_text:
         raise RuntimeError(
             "Gemini returned an empty response. The content may have been blocked "
             "by safety filters. Please try different text."
         )
 
-    logger.info("Gemini responded successfully | output_length=%d", len(response.text))
-    return response.text
+    logger.info("Gemini responded successfully | output_length=%d", len(result_text))
+    return result_text
 
 
 # ─────────────────────────────────────────────
