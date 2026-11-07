@@ -86,8 +86,16 @@ ALLOWED_LEVELS = set(LEVEL_PROMPTS.keys())
 # Maximum characters we'll send to Groq in one request
 MAX_INPUT_CHARS = 30_000
 
-# Groq model to use — fast and free
-GROQ_MODEL = "llama-3.1-8b-instant"
+# Groq model — try in order until one works
+GROQ_MODELS = [
+    "llama3-8b-8192",
+    "llama3-70b-8192",
+    "mixtral-8x7b-32768",
+    "gemma2-9b-it",
+    "gemma-7b-it",
+]
+GROQ_MODEL = GROQ_MODELS[0]  # default shown in health check
+
 
 
 def build_groq_response(text: str, level: str) -> str:
@@ -123,34 +131,43 @@ def build_groq_response(text: str, level: str) -> str:
 
     system_prompt = LEVEL_PROMPTS[level]
 
-    logger.info("Sending request to Groq | model=%s | level=%s | input_length=%d",
-                GROQ_MODEL, level, len(text))
+    logger.info("Sending request to Groq | level=%s | input_length=%d", level, len(text))
 
-    try:
-        completion = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": text},
-            ],
-            temperature=0.2,
-            max_tokens=2048,
-            top_p=0.8,
-        )
-
-        result_text = completion.choices[0].message.content
-
-        if not result_text or not result_text.strip():
-            raise RuntimeError(
-                "Groq returned an empty response. Please try again."
+    last_err = None
+    for model_name in GROQ_MODELS:
+        try:
+            completion = groq_client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": text},
+                ],
+                temperature=0.2,
+                max_tokens=2048,
+                top_p=0.8,
             )
 
-        logger.info("Groq responded successfully | output_length=%d", len(result_text))
-        return result_text.strip()
+            result_text = completion.choices[0].message.content
 
-    except Exception as exc:
-        logger.exception("Groq API call failed: %s", exc)
-        raise RuntimeError(f"AI API error: {str(exc)}") from exc
+            if not result_text or not result_text.strip():
+                raise RuntimeError("Groq returned an empty response. Please try again.")
+
+            logger.info("Groq responded via %s | output_length=%d", model_name, len(result_text))
+            return result_text.strip()
+
+        except Exception as exc:
+            err_str = str(exc)
+            if "model_not_found" in err_str or "does not exist" in err_str or "404" in err_str:
+                logger.warning("Model %s not available, trying next. Error: %s", model_name, exc)
+                last_err = exc
+                continue
+            # Non-model error — raise immediately
+            logger.exception("Groq API call failed on model %s: %s", model_name, exc)
+            raise RuntimeError(f"AI API error: {str(exc)}") from exc
+
+    # All models exhausted
+    raise RuntimeError(f"No Groq models available. Last error: {last_err}")
+
 
 
 # ─────────────────────────────────────────────
