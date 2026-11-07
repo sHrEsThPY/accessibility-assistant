@@ -9,9 +9,21 @@ const BASE_URL = import.meta.env.VITE_API_URL
   ? import.meta.env.VITE_API_URL
   : '/api'
 
+export function getApiRoot() {
+  return BASE_URL
+}
+
 const api = axios.create({
   baseURL: BASE_URL,
-  timeout: 60_000, // 60 s — Gemini can be slow on first cold start
+  timeout: 60_000,
+})
+
+api.interceptors.request.use((config) => {
+  const token = sessionStorage.getItem('aa_token')
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
 })
 
 /**
@@ -55,6 +67,31 @@ export async function uploadDocument(file, level, onProgress) {
  */
 export async function pingHealth() {
   const response = await api.get('/health')
+  return response.data
+}
+
+export async function fetchAuthConfig() {
+  const response = await api.get('/auth/config')
+  return response.data
+}
+
+export async function loginWithEmail(email, password) {
+  const response = await api.post('/auth/login', { email, password })
+  return response.data
+}
+
+export async function signupWithEmail(name, email, password) {
+  const response = await api.post('/auth/signup', { name, email, password })
+  return response.data
+}
+
+export async function loginWithGoogle({ access_token, credential }) {
+  const response = await api.post('/auth/google', { access_token, credential })
+  return response.data
+}
+
+export async function fetchCurrentUser() {
+  const response = await api.get('/auth/me')
   return response.data
 }
 

@@ -13,6 +13,7 @@ from groq import Groq
 
 import PyPDF2
 from docx import Document
+from auth import init_auth
 
 # ─────────────────────────────────────────────
 # App Initialisation
@@ -50,6 +51,8 @@ if not GROQ_API_KEY:
 else:
     groq_client = Groq(api_key=GROQ_API_KEY)
     logger.info("Groq client initialised successfully.")
+
+init_auth(app)
 
 
 # ─────────────────────────────────────────────
@@ -393,6 +396,10 @@ def health():
         "ai_provider": "groq",
         "model": GROQ_MODEL,
         "groq_configured": bool(GROQ_API_KEY),
+        "google_auth": bool(os.environ.get("GOOGLE_CLIENT_ID")),
+        "github_auth": bool(
+            os.environ.get("GITHUB_CLIENT_ID") and os.environ.get("GITHUB_CLIENT_SECRET")
+        ),
     }), 200
 
 

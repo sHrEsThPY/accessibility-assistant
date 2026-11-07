@@ -56,11 +56,13 @@ export default function SignupPage() {
 
   async function handleSocial(provider) {
     try {
-      await signInWithProvider(provider)
-      toast.success(`Welcome! Signed up with ${provider === 'google' ? 'Google' : 'GitHub'}.`)
-      navigate('/dashboard')
-    } catch {
-      toast.error('Social sign-up failed. Please try again.')
+      const user = await signInWithProvider(provider)
+      if (user) {
+        toast.success(`Welcome! Signed in with Google.`)
+        navigate('/dashboard')
+      }
+    } catch (err) {
+      toast.error(err.message || 'Social sign-in failed. Please try again.')
     }
   }
 

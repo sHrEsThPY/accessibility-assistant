@@ -48,11 +48,15 @@ export default function LoginPage() {
 
   async function handleSocial(provider) {
     try {
-      await signInWithProvider(provider)
-      toast.success(`Signed in with ${provider === 'google' ? 'Google' : 'GitHub'}!`)
-      navigate('/dashboard')
-    } catch {
-      toast.error('Social sign-in failed. Please try again.')
+      const user = await signInWithProvider(provider)
+      // GitHub redirects away to /auth/github, so user will be undefined here.
+      // Google completes in-place and returns the user object.
+      if (user) {
+        toast.success(`Signed in with Google!`)
+        navigate('/dashboard')
+      }
+    } catch (err) {
+      toast.error(err.message || 'Social sign-in failed. Please try again.')
     }
   }
 

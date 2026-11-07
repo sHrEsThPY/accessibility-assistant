@@ -18,6 +18,8 @@ venv/
 # real .env files (NEVER commit secrets)
 .env
 backend/.env
+backend/data/
+*.db
 
 # ── Flask ─────────────────────────────────
 instance/
