@@ -86,15 +86,17 @@ ALLOWED_LEVELS = set(LEVEL_PROMPTS.keys())
 # Maximum characters we'll send to Groq in one request
 MAX_INPUT_CHARS = 30_000
 
-# Groq model — try in order until one works
+# Groq models — try in order until one works.
+# Older IDs (llama3-8b-8192, mixtral, gemma, llama-3.1-8b-instant on free/dev)
+# were decommissioned; keep current production IDs first.
 GROQ_MODELS = [
-    "llama3-8b-8192",
-    "llama3-70b-8192",
-    "mixtral-8x7b-32768",
-    "gemma2-9b-it",
-    "gemma-7b-it",
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+    "qwen/qwen3.8-27b",
+    "llama-3.1-8b-instant",
+    "llama-3.3-70b-versatile",
 ]
-GROQ_MODEL = GROQ_MODELS[0]  # default shown in health check
+GROQ_MODEL = os.environ.get("GROQ_MODEL", GROQ_MODELS[0])
 
 
 
@@ -133,8 +135,9 @@ def build_groq_response(text: str, level: str) -> str:
 
     logger.info("Sending request to Groq | level=%s | input_length=%d", level, len(text))
 
+    models_to_try = [GROQ_MODEL] + [m for m in GROQ_MODELS if m != GROQ_MODEL]
     last_err = None
-    for model_name in GROQ_MODELS:
+    for model_name in models_to_try:
         try:
             completion = groq_client.chat.completions.create(
                 model=model_name,
@@ -147,7 +150,11 @@ def build_groq_response(text: str, level: str) -> str:
                 top_p=0.8,
             )
 
-            result_text = completion.choices[0].message.content
+            message = completion.choices[0].message
+            result_text = getattr(message, "content", None) or ""
+            if not result_text.strip():
+                # Some reasoning models put the answer in a separate field
+                result_text = getattr(message, "reasoning", None) or ""
 
             if not result_text or not result_text.strip():
                 raise RuntimeError("Groq returned an empty response. Please try again.")
@@ -156,8 +163,20 @@ def build_groq_response(text: str, level: str) -> str:
             return result_text.strip()
 
         except Exception as exc:
-            err_str = str(exc)
-            if "model_not_found" in err_str or "does not exist" in err_str or "404" in err_str:
+            err_str = str(exc).lower()
+            unavailable = any(
+                token in err_str
+                for token in (
+                    "model_not_found",
+                    "does not exist",
+                    "decommissioned",
+                    "deprecated",
+                    "not available",
+                    "invalid_model",
+                    "404",
+                )
+            )
+            if unavailable:
                 logger.warning("Model %s not available, trying next. Error: %s", model_name, exc)
                 last_err = exc
                 continue

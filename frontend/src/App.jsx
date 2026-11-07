@@ -45,8 +45,8 @@ export default function App() {
     pingHealth()
       .then((data) => {
         setBackendOk(true)
-        if (!data.gemini_configured) {
-          toast.error('Backend is running but GEMINI_API_KEY is not configured.', { id: 'api-key' })
+        if (!data.groq_configured) {
+          toast.error('Backend is running but GROQ_API_KEY is not configured.', { id: 'api-key' })
         }
       })
       .catch(() => {
