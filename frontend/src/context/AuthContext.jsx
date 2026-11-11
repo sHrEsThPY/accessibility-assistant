@@ -100,6 +100,29 @@ export function AuthProvider({ children }) {
   }
 
   /**
+   * Wait for the Google Identity Services SDK to be ready (loaded via async script tag).
+   * Polls up to 5 seconds before giving up.
+   */
+  function _waitForGIS(timeoutMs = 5000) {
+    return new Promise((resolve, reject) => {
+      if (window.google?.accounts?.oauth2) {
+        resolve()
+        return
+      }
+      const start = Date.now()
+      const interval = setInterval(() => {
+        if (window.google?.accounts?.oauth2) {
+          clearInterval(interval)
+          resolve()
+        } else if (Date.now() - start > timeoutMs) {
+          clearInterval(interval)
+          reject(new Error('Google SDK failed to load. Please refresh the page and try again.'))
+        }
+      }, 100)
+    })
+  }
+
+  /**
    * Real Google Sign-In using Google Identity Services (GIS).
    * Launches the official Google account chooser popup, verifies the token on the backend,
    * creates/updates the user, and signs them in.
@@ -114,13 +137,12 @@ export function AuthProvider({ children }) {
 
       if (!clientId) {
         throw new Error(
-          'Google Sign-In is not configured yet. Please add GOOGLE_CLIENT_ID to backend environment variables.'
+          'Google Sign-In is not configured. Please contact support or try signing in with email.'
         )
       }
 
-      if (typeof window === 'undefined' || !window.google?.accounts?.oauth2) {
-        throw new Error('Google Identity Services SDK is loading. Please try again in a moment.')
-      }
+      // Wait up to 5s for the GIS script tag to finish loading
+      await _waitForGIS()
 
       const tokenResponse = await new Promise((resolve, reject) => {
         const client = window.google.accounts.oauth2.initTokenClient({
@@ -134,7 +156,7 @@ export function AuthProvider({ children }) {
             }
           },
           error_callback: (err) => {
-            reject(new Error(err?.message || 'Google Sign-In prompt was dismissed.'))
+            reject(new Error(err?.message || 'Google Sign-In was cancelled.'))
           },
         })
         client.requestAccessToken({ prompt: 'select_account' })
